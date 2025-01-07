@@ -99,21 +99,29 @@ class NebisDB:
         parsed_url = urlparse(db_url)
         self.username = parsed_url.username
         self.password = parsed_url.password
-        self.remote_url = f"http://{parsed_url.hostname}:{parsed_url.port or 5000}/{parsed_url.path.lstrip('/')}"
+        self.remote_url = f"http://{parsed_url.hostname}/{parsed_url.path.lstrip('/')}.json"
         
         # Establecer el nombre del archivo sin la extensión
         self.filename = os.path.basename(parsed_url.path)  # Esto tomará solo el nombre del archivo sin la extensión
         self.load_remote_data()
 
-    def load_remote_data(self):
-        """Carga datos desde la base de datos remota."""
+    def load_remote_data(self, retries=3, timeout=10):
+        """Carga datos desde la base de datos remota con reintentos."""
         try:
-            response = requests.get(f"https://nebisdb.pythonanywhere.com/files/{self.filename}.json", auth=(self.username, self.password))
-            if response.status_code == 200:
-                self.data = response.json()
-            else:
-                logging.error(f"Error al cargar datos remotos: {response.status_code}")
-                self.data = {}
+            for attempt in range(retries):
+                response = requests.get(f"https://nebisdb.pythonanywhere.com/files/{self.filename}.json", auth=(self.username, self.password), timeout=timeout)
+                if response.status_code == 200:
+                    self.data = response.json()
+                    return
+                else:
+                    logging.error(f"Error al cargar datos remotos: {response.status_code}")
+                
+                # Espera un tiempo antes de reintentar
+                time.sleep(2 ** attempt)  # Exponencial backoff
+
+            # Si después de varios intentos no se logra la conexión, maneja el error
+            self.data = {}
+            logging.error("Error al cargar datos remotos después de múltiples intentos.")
         except requests.exceptions.RequestException as e:
             logging.error(f"Error al conectar a la base de datos remota: {e}")
             self.data = {}
@@ -442,19 +450,27 @@ def get_nebis_url():
     database_name = request.args.get('database')
     password = request.args.get('password')
 
-    if not db.is_connected():
-        return jsonify({"error": "No se ha conectado a una base de datos."}), 400
-
-    db_url = f"nebis://{username}:{password}@https://nebisdb.pythonanywhere.com/{database_name}"
-    return jsonify({"nebis_url": db_url}), 200
+    if db.is_connected() and db.username == username and db.password == password:
+        db_url = f"nebis://{username}:{password}@https://nebisdb.pythonanywhere.com/{database_name}"
+        return jsonify({"nebis_url": db_url}), 200
+    else:
+        return jsonify({"error": "No se ha conectado a una base de datos o credenciales incorrectas."}), 400
 
 @app.route('/connect', methods=['POST'])
 def connect():
     """Endpoint para conectar a una base de datos usando la URL proporcionada."""
     content = request.json
     db_url = content.get('db_url')
-    db.connect(db_url)
-    return jsonify({"message": "Connected to the database!"}), 200
+
+    if not db_url:
+        return jsonify({"error": "Faltan datos para la conexión."}), 400
+
+    try:
+        db.connect(db_url)
+        return jsonify({"message": "Connected to the database!"}), 200
+    except Exception as e:
+        logging.error(f"Error al conectar a la base de datos: {e}")
+        return jsonify({"error": "Error al conectar a la base de datos."}), 500
 
 @app.route('/add', methods=['POST'])
 def add_entry():
@@ -497,16 +513,17 @@ def get_entry(key):
 @app.route('/files/<path:filename>', methods=['GET'])
 def serve_file(filename):
     """Endpoint para servir archivos JSON o MessagePack."""
-    if os.path.exists(filename):
+    file_path = os.path.join('/home/nebisdb/databases', filename)
+    if os.path.exists(file_path):
         if filename.endswith('.msgpack'):
             # Convertir MessagePack a JSON para la descarga
-            with open(filename, 'rb') as f:
+            with open(file_path, 'rb') as f:
                 data = msgpack.load(f, raw=False)
             response = jsonify(data)
             response.mimetype = 'application/json'
             return response
         elif filename.endswith('.json'):
-            return send_from_directory(os.getcwd(), filename)
+            return send_from_directory('/home/nebisdb/databases', filename)
     return jsonify({"error": "Archivo no encontrado."}), 404
 
 @app.route('/add_database', methods=['POST'])
