@@ -390,7 +390,8 @@ def register():
         validate_password(password)
         validate_email(email)
     except ValueError as e:
-        return jsonify({"error": str(e)}), 400
+        logging.error(f"Validation error: {str(e)}")
+        return jsonify({"error": "Datos de registro inválidos."}), 400
 
     result = db.register(username, password, email)
     if "error" in result:
